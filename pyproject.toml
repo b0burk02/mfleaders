@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mfleaders"
+version = "0.1.0"
+description = "Dimension-generic wavelet-leader multifractal analysis (1D, 2D, 3D)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.9",
+    "PyWavelets>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    # Pinned: the 1D pymultifracs comparison tests are a non-reference
+    # regression check (the certified reference is the MATLAB MULTIFRACS
+    # toolbox, 2D), evaluated specifically against this version -- see
+    # CLAUDE.md and tests/test_oracle_pymultifracs.py/test_dwt.py's xfail
+    # markers. Do not bump without re-checking those tests.
+    "pymultifracs==0.3.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

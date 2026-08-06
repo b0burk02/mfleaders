@@ -1,0 +1,44 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Data cubes, images, and other large/binary scientific data formats --
+# never committed. This project does not want observational or simulated
+# data (Eos WNM/cold-gas column-density maps, synthetic cascade/fBm test
+# fields, or any other cube/image) inside git history, regardless of size.
+*.mat
+*.npy
+*.npz
+*.fits
+*.fit
+*.h5
+*.hdf5
+
+# MATLAB toolbox / binary artifacts, in case a copy of MULTIFRACS or a
+# similar toolbox ever ends up inside this tree (none currently does --
+# the real MULTIFRACS toolbox lives in a separate, sibling project
+# directory and was never copied in here; this is a defensive rule).
+*.mex*
+*.fig
+/multifracs/
+/MF_BS_tool*/
+
+# handoff/plbmf_crosscheck/ cross-check artifacts: the two input fields
+# (cascade_input.mat, fbm2d_input.mat) are already excluded by the *.mat
+# rule above. The historical, JSON-only investigation artifacts below are
+# excluded too -- not loaded by any test, kept out of the first commit to
+# keep it minimal (see mfleaders_reference_output*.json,
+# mfleaders_cascade_*.json, multifracs_crosscheck_output.json).
+# multifracs_perscale_output.json and SPEC.md are NOT excluded: a test
+# loads the former, and the latter documents the cross-check configuration.
+handoff/plbmf_crosscheck/mfleaders_reference_output.json
+handoff/plbmf_crosscheck/mfleaders_reference_output_unweighted.json
+handoff/plbmf_crosscheck/mfleaders_reference_output_matchedfit.json
+handoff/plbmf_crosscheck/mfleaders_cascade_perscale.json
+handoff/plbmf_crosscheck/mfleaders_cascade_borderdiscard.json
+handoff/plbmf_crosscheck/multifracs_crosscheck_output.json
