@@ -272,6 +272,158 @@ DWT (pywt wavedec/wavedec2, Daubechies, order configurable ~db3-db4)
         recovery, D(h) collapse to a point, both branches). Do not read
         this entry as closing that rung; it closes a different,
         narrower, but real claim.
-- [ ] p-leaders + finite-resolution correction
+- [x] p-leaders LEADER CONSTRUCTION (closed 2026-08-11) -- finite p added to
+      `leaders.compute_leaders` (new `p` parameter, default `np.inf`,
+      byte-identical regression-guarded: `test_p_inf_default_matches_
+      explicit_p_inf`, `test_p_inf_leaders_2d_unchanged_by_finite_p_
+      addition`) and `_dwt2.leaders_2d` (new `p` parameter). Localized
+      extension per explicit instruction: reuses `_neighborhood_max`/
+      `_fold_children` unchanged for p=inf, and (for finite p) via a new
+      `op` parameter on both (default `np.max`, preserving every existing
+      caller; finite p passes `op=np.sum`) -- the DWT and border handling
+      were not touched. Traced from MULTIFRACS's `DxPx2d.m` line by line
+      (`compute_leader_sans_voisin` / `compute_leader_from_neigbourhood`,
+      literally one function each for p=inf and finite p, differing only
+      in the max-vs-sum reduction), not re-derived from the textbook WRJA
+      formula independently -- see leaders.py's module docstring for the
+      exact construction (own(j) = 2**(dim*j)*|coef(j)|**p; fold via SUM
+      with weight=1.0, not the p=inf `weight` parameter; neighborhood via
+      SUM; finish off AFTER the full scale loop:
+      leader(j) = (2**(-dim*j)*accumulated(j))**(1/p)).
+      Orientation combination for finite p (`_dwt2.combine_orientations_p`)
+      sums `|coef_o|**p` over the 3 orientations BEFORE the recursion --
+      PROVEN equivalent to MULTIFRACS's own per-orientation-then-sum-at-
+      the-end structure, unlike p=inf's max: every step of the finite-p
+      pipeline up to the single final root is a pure sum, and sum (unlike
+      max, which relies on idempotence) is associative/commutative/
+      distributive across ANY grouping of neighborhood/cone/orientation
+      axes, so pre- vs post-combining orientations is provably identical
+      as long as `|.|**p` is applied to each raw coefficient exactly once
+      and the root is taken exactly once, at the very end.
+      VALIDATED against MULTIFRACS's actual `DxPx2d.m` (run directly in
+      MATLAB R2026a, not re-derived/assumed): leader values match to
+      max relative diff ~4e-11 to ~1e-9 (same tolerance class as the
+      already-certified p=inf cross-check) at p=1 and p=2, confirmed on
+      TWO independent synthetic fields (128x128 H=0.6 and 96x96 H=0.35)
+      plus a spot-check at p=0.5, p=1.5, p=3 on a third field -- all
+      matching to the same precision. Comparison is against MULTIFRACS's
+      OWN construction with `param_est.plead_corr=0` (its NLcorrPL2d.m
+      nonlinearity-correction post-step DISABLED) -- MULTIFRACS's default
+      output has that correction baked in, and comparing against it
+      uncorrected initially produced a large, confusing residual (traced
+      to this, not a bug in the leader recursion -- confirmed by an
+      independent literal Python transliteration of DxPx2d.m matching
+      mfleaders' abstracted implementation to ~1e-15, and by directly
+      diffing the intermediate cone-only `sans_voisin` accumulator against
+      a MATLAB debug dump, which already matched to ~1e-9 BEFORE the
+      correction was disabled -- see tests/test_pleaders.py's docstring).
+      Regression guard: `tests/test_pleaders.py`'s MULTIFRACS cross-check
+      test reads a compact JSON extract (scales 2-3 only, the base case at
+      scale 1 omitted) of this same validated MATLAB run from a local, NOT
+      committed path (`handoff/plbmf_crosscheck/
+      multifracs_pleader_reference.json`) -- guarded by
+      `pytest.mark.skipif`, so it runs when that file is present locally
+      and skips gracefully (not an error) on a fresh clone, where it is
+      not shipped. The MATLAB validation itself is real and is reported
+      here and in README's Validation section as a cited result, not as a
+      shipped, re-runnable artifact.
+      p-VALIDITY: MULTIFRACS does not hard-reject an invalid p; `NLcorrPL2d.m`
+      computes `zp` (regression slope of `log2(mean(|coefficient(j)|**p))`
+      vs j) and warns ("p-leaders undefined... estimates can be biased...
+      a smaller p or larger gamint should be selected") when `zp <= 0`,
+      rather than refusing to compute. Mirrored here (`leaders.py`'s
+      `_p_validity_zp`) as the same kind of warning, minus the gamint
+      remedy (see below) -- tested by `test_p_validity_warning_fires_on_
+      field_with_many_exact_zeros` / `..._does_not_fire_on_well_behaved_
+      field`.
+      NOT IMPLEMENTED, explicitly out of THIS extension's stated scope
+      ("only the leader-construction step changes"): (a) `gamint`
+      (fractional integration applied to coefficients BEFORE leader
+      construction, MULTIFRACS's mechanism for giving a low-regularity
+      process enough headroom for a chosen p) and its paired `NLcorrPL2d.m`
+      nonlinearity correction (multiplies the raw leader by a scale-
+      dependent factor after the fact) -- a coefficient-level
+      preprocessing feature, not a leader-construction one; (b) finite p
+      under `cone='pymultifracs'` (raises `NotImplementedError` --
+      pymultifracs' own finite-p support, if any, has not been read or
+      validated). The "finite-resolution correction" this project's own
+      roadmap referred to is this NLcorrPL2d/gamint machinery -- still
+      open, tracked separately from leader construction now that the
+      latter is validated.
+- [x] p-leaders VALIDATED ON REAL DATA + plead_corr=2 IMPACT QUANTIFIED
+      (closed 2026-08-12). Re-ran the MATLAB cross-check above on actual
+      Eos HI column-density data (GALFA, the 397x180 and 389x429 rectangles
+      used throughout the Eos investigation), not just synthetic fields:
+      mfleaders reproduces MATLAB MULTIFRACS's uncorrected (`plead_corr=0`)
+      leader construction to machine precision, verified on synthetic
+      fields and on real Eos HI data (max rel diff ~1e-10). The
+      `plead_corr=2` correction (MATLAB default) is NOT implemented, but
+      was verified to be EXACTLY ZERO for c2, Delta-h, and D(q) shape at
+      short fit range (j1=2, j2=4, the 3-scale worst case this correction
+      would matter most for); it produces only a ~0.06 rigid shift in the
+      h(q) location. Therefore width/multifractality results are identical
+      to MATLAB-default; only absolute h/H point estimates carry the small
+      shift. Mechanistically understood, not just observed: `NLcorrPL2d.m`
+      multiplies every leader at a scale by the SAME (pixel-independent)
+      constant, which cancels exactly out of the leader-ratio R(j,q,k)
+      D(q) is built from, and shifts log|L(j,.)| by a q-independent
+      additive constant per scale -- shifting h(q) by the same amount for
+      every q (so Delta-h, a difference, cancels it exactly) while leaving
+      the variance-based c2 untouched (adding a constant to a set doesn't
+      change its variance). This MATLAB cross-check (script, both
+      `plead_corr` settings' raw leader output, and the comparison
+      summary), plus the earlier synthetic-field MATLAB comparisons, were
+      run and kept locally under `handoff/plbmf_crosscheck/` but are NOT
+      shipped in this repository -- reported here and in README's
+      Validation section as a cited statement rather than as re-runnable
+      artifacts.
+- [x] lacunarity module ADDED (2026-08-12), explicitly a diagnostic, NOT
+      cross-validated -- distinct in kind from every entry above.
+      `src/mfleaders/lacunarity.py`: gray-level gliding-box lacunarity
+      Lambda(r), a complementary structure diagnostic (gappiness/void
+      structure). NOT part of the validated public API and NOT exported
+      from `__init__.py` (same convention as the internal 1D pipeline, for
+      the same reason: it has not been checked against an external
+      reference implementation the way the leader/zeta/spectrum/cumulant
+      pipeline has). Compare Lambda(r) CURVES (height at small r, decay
+      shape), never a single fitted slope -- fitting one slope was shown,
+      in the exploratory work this was extracted from
+      (`examples/discriminant_calibration.py`, `examples/eos_lacunarity_
+      check.py`), to wash out real shape differences between otherwise
+      visibly-different curves. On a full rectangular field the
+      boundary handling is trivial (`valid_mask` defaults to all-True); on
+      an irregular/masked footprint, pass `valid_mask` explicitly and the
+      exterior is excluded by eroding the valid region by the box radius
+      -- never by zero-filling it (zero-fill was separately shown, same
+      exploratory work, to make an irregular mask numerically
+      indistinguishable from a full rectangle).
+      A REAL BUG WAS FOUND AND FIXED while writing this module's own test
+      suite (`tests/test_lacunarity.py`), not assumed safe by inspection:
+      `scipy.ndimage.uniform_filter` propagates a SINGLE NaN across its
+      ENTIRE output array, not just positions within a box's reach
+      (verified directly: one NaN pixel in a 10x10 test field NaN'd out
+      all 100 `uniform_filter` outputs, at every box size tried) -- unlike
+      the DWT-level convolution elsewhere in mfleaders (`leaders.py`,
+      `_dwt2.py`), which only corrupts positions its kernel actually
+      touches. Unhandled, this would have silently defeated the
+      erosion-based exclusion: erosion picks out which OUTPUT POSITIONS to
+      trust, but the INPUT array itself would already have gone
+      entirely-NaN inside `uniform_filter`, leaving nothing valid to read
+      regardless of erosion. Fixed by replacing invalid positions with a
+      finite placeholder (value irrelevant -- erosion guarantees a kept
+      position's box never actually touches one) before filtering, and by
+      computing the `binarize='median'`/float-threshold statistics over
+      the valid subset only (the same whole-array-NaN exposure applied to
+      `np.median`/`.mean()` too). This was never triggered during this
+      session's own actual use of the pre-fix version (every real call
+      passed already-fully-valid rectangles, never a genuinely masked
+      field with the erosion path actually exercised) -- caught only
+      because the committed test suite deliberately exercises a real NaN
+      region with an explicit `valid_mask`, not the trivial all-valid case.
+      Smoke-tested only (`tests/test_lacunarity.py`: smooth field near
+      Lambda=1, sparse/structured field well above 1, both curves
+      non-increasing with box size, the mask-erosion path free of NaN
+      contamination, and the `binarize='median'`-gives-50%-coverage
+      caveat) -- NOT an external cross-validation, and not claimed as one.
 - [ ] bootstrap CIs
 - [ ] docs + packaging

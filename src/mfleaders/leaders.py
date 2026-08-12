@@ -57,17 +57,80 @@ comparable via this one parameter (not a forked/duplicated implementation).
 Base case. At the finest scale there is no finer cone to fold in, so the
 leader there is always a plain neighborhood max with no damping, regardless
 of `weight` (there is nothing to damp yet).
+
+Finite-p (p-leaders). Reproduces MULTIFRACS's ``DxPx2d.m`` finite-p
+construction exactly (``compute_leader_sans_voisin`` / ``compute_leader_
+from_neigbourhood``, both literally SAME function for p=inf and finite p in
+that source -- only the final reduction (max vs sum) differs), traced line
+by line rather than re-derived from the textbook WRJA formula independently
+(this project's own standard: match the reference toolbox's actual
+algorithm, not a recalled formula that might use a different, also-valid
+convention). Concretely, for finite p:
+
+  own(j)   = 2**(dim*j) * |coefficient(j)|**p      (NOT |coefficient(j)|,
+                                                      and NOT weighted --
+                                                      the weight parameter
+                                                      only applies to p=inf)
+  fold     = SUM over (own, weight=1.0 * the 2**dim children), instead of
+             MAX -- reusing `_fold_children` with `op=np.sum` and a fixed
+             weight of 1.0 (DxPx2d.m's finite-p fold applies NO extra
+             per-fold damping; all the scale-dependence lives in `own`'s
+             2**(dim*j) factor, applied once, at birth)
+  neighbor = SUM over the padded 3**dim neighborhood, instead of MAX --
+             reusing `_neighborhood_max` with `op=np.sum`
+  finish   = AFTER the full scale loop: leader(j) = (2**(-dim*j) *
+             accumulated(j)) ** (1/p) -- DxPx2d.m's separate "p-Leaders
+             finish off" loop, applied once per scale, not per fold step.
+
+Orientation combination for finite p is proven equivalent to MULTIFRACS's
+own per-orientation-then-sum-at-the-end structure by linearity: unlike
+p=inf's max (which composes freely across ANY grouping of neighborhood/
+cone/orientation because max is idempotent), summing is ALSO fully
+associative/commutative/distributive across those same axes, and every
+step in the finite-p pipeline up to the single final `**(1/p)` root is a
+pure sum -- so pre-combining orientations via `sum_o |coef_o|**p` BEFORE
+this recursion (done in `_dwt2.py`'s `combine_orientations_p`, not here --
+this module stays orientation-agnostic per rule 2) gives bit-identical
+results to combining them only at the end, as long as the abs/power
+transform is applied to each raw orientation coefficient exactly once and
+the root is taken exactly once, at the very end. See
+`compute_leaders`'s ``pre_combined_power`` parameter.
+
+p-validity. MULTIFRACS does not hard-reject an invalid p: `NLcorrPL2d.m`
+computes `zp`, the regression slope of `log2(mean(|coefficient(j)|**p))`
+against j (an estimate of the coefficients' own p-th-moment scaling
+exponent), and treats `zp <= 0` as "the correction term for p-leaders is
+undefined... final estimates can be biased... a smaller p (or larger
+gamint) should be selected" -- a WARNING, not a refusal, with fractional
+integration (gamint) as its suggested remedy. `gamint` is a coefficient-
+level preprocessing step applied before leader construction (with its own
+nonlinear post-hoc correction, `NLcorrPL2d.m`) -- implementing it is out of
+this extension's stated scope (leader construction only). `_p_validity_zp`
+below mirrors MULTIFRACS's OWN check (same regression-slope-of-log2-mean
+quantity) and emits the same kind of warning, minus the gamint remedy this
+package does not implement.
 """
 
 import itertools
+import warnings
 
 import numpy as np
+
+from .regression import linear_regression
 
 _UNSET = object()
 
 
-def _neighborhood_max(coefs, dim, boundary='discard'):
+def _neighborhood_max(coefs, dim, boundary='discard', op=np.max):
     """Max over a (3,)*dim neighborhood.
+
+    `op` (default ``np.max``, matching every existing caller): the
+    reduction applied to the stacked neighborhood candidates. Passing
+    ``np.sum`` (used only by `compute_leaders`'s finite-p path) reuses the
+    exact same candidate-stacking geometry with MULTIFRACS's own finite-p
+    reduction -- `DxPx2d.m`'s ``compute_leader_from_neigbourhood`` is
+    literally one function, shared between p=inf and finite p, differing
+    only in this reduction.
 
     boundary : 'discard' | 'pad'
         'discard' (default): border positions -> NaN, unconditionally,
@@ -103,7 +166,7 @@ def _neighborhood_max(coefs, dim, boundary='discard'):
             stack.append(padded[sl])
         stacked = np.stack(stack, axis=0)
         with np.errstate(invalid='ignore'):
-            return np.max(stacked, axis=0)
+            return op(stacked, axis=0)
 
     out = np.full(shape, np.nan)
 
@@ -119,21 +182,26 @@ def _neighborhood_max(coefs, dim, boundary='discard'):
 
     stacked = np.stack(stack, axis=0)
     with np.errstate(invalid='ignore'):
-        out[interior] = np.max(stacked, axis=0)
+        out[interior] = op(stacked, axis=0)
 
     return out
 
 
-def _fold_children(window_max, finer_leader, dim, weight):
+def _fold_children(window_max, finer_leader, dim, weight, op=np.max):
     """Combine this scale's neighborhood max with the finer scale's leaders.
 
     ``finer_leader`` has roughly twice ``window_max``'s extent per axis
     (dyadic subsampling): parent index k's children live at 2k, 2k+1 along
     each axis. Each child contributes ``weight * finer_leader[child]``; the
-    result is the elementwise max of ``window_max`` and all ``2**dim``
-    weighted children. As in `_neighborhood_max`, a single NaN among these
-    ``1 + 2**dim`` candidates invalidates the position (plain ``max``, not
-    ``nanmax``) -- a leader needs its whole cone, not just what's available.
+    result is the elementwise reduction (``op``, default ``np.max`` --
+    matching every existing caller byte-for-byte) of ``window_max`` and all
+    ``2**dim`` weighted children. As in `_neighborhood_max`, a single NaN
+    among these ``1 + 2**dim`` candidates invalidates the position (plain
+    ``max``/``sum``, not ``nanmax``/``nansum``) -- a leader needs its whole
+    cone, not just what's available. ``op=np.sum`` (finite-p path) reuses
+    this exact candidate geometry with MULTIFRACS's own finite-p reduction
+    (`DxPx2d.m`'s ``compute_leader_sans_voisin`` -- one function, shared
+    between p=inf and finite p, differing only in this reduction).
     """
     parent_shape = window_max.shape
     child_shape = finer_leader.shape
@@ -153,14 +221,56 @@ def _fold_children(window_max, finer_leader, dim, weight):
 
     stacked = np.stack(stack, axis=0)
     with np.errstate(invalid='ignore'):
-        result = np.max(stacked, axis=0)
+        result = op(stacked, axis=0)
 
     return result
 
 
+def _p_validity_zp(base_by_scale, scales, p):
+    """Mirror MULTIFRACS's own p-leader validity check (`NLcorrPL2d.m`):
+    the regression slope of log2(mean(|coefficient(j)|**p)) against j (an
+    estimate of the coefficients' own p-th-moment scaling exponent, called
+    `zp` there). MULTIFRACS treats `zp <= 0` as "the correction term for
+    p-leaders is undefined... final estimates can be biased" and warns
+    rather than refusing to compute -- same here. `base_by_scale[j]` is
+    already ``|coefficient(j)|**p`` (or, for the orientation-combined 2D
+    case, ``sum_o |coef_o(j)|**p``) -- i.e. exactly the quantity this check
+    needs, already computed by `compute_leaders` for the leader
+    construction itself; passed in rather than recomputed.
+    """
+    zpj = np.full(len(scales), np.nan)
+    for i, j in enumerate(scales):
+        vals = base_by_scale[j]
+        finite = vals[np.isfinite(vals)]
+        if finite.size == 0:
+            continue
+        with np.errstate(divide='ignore'):
+            mean_val = np.mean(finite)
+            zpj[i] = np.log2(mean_val) if mean_val > 0 else -np.inf
+
+    slope, _ = linear_regression(np.array(scales, dtype=float), zpj)
+    if np.isnan(slope) or slope <= 0:
+        warnings.warn(
+            f"p-leader validity check failed for p={p} (mirroring "
+            f"MULTIFRACS's NLcorrPL2d.m): the coefficients' own p-th-"
+            f"moment scaling exponent eta(p) -- the regression slope of "
+            f"log2(mean(|coefficient(j)|**p)) vs scale j -- is "
+            f"{slope:.4g}, not > 0. MULTIFRACS treats this as 'p-leaders "
+            f"undefined, estimates can be biased' and recommends a "
+            f"smaller p (or fractional integration via a larger gamint, "
+            f"which this extension does not implement -- out of scope, "
+            f"see compute_leaders' docstring). Proceeding anyway; treat "
+            f"the resulting zeta(q)/D(h) with caution.",
+            RuntimeWarning, stacklevel=3,
+        )
+    return slope
+
+
 def compute_leaders(coeffs_by_scale, dim=1, weight=_UNSET,
-                    boundary=_UNSET, cone='multifracs'):
-    """Build p=infinity wavelet leaders from per-scale coefficient arrays.
+                    boundary=_UNSET, cone='multifracs', p=np.inf,
+                    pre_combined_power=False):
+    """Build wavelet leaders (p=infinity, the default) or finite-p leaders
+    from per-scale coefficient arrays.
 
     Calling this with NO keyword arguments beyond ``dim`` reproduces
     MULTIFRACS's own leader construction exactly (audited requirement: the
@@ -265,12 +375,40 @@ def compute_leaders(coeffs_by_scale, dim=1, weight=_UNSET,
         from ``'pymultifracs'`` to ``'multifracs'`` collapsed a persistent
         zeta(q) residual against the MULTIFRACS reference from ~0.1-0.5 to
         machine precision, across the full q range tested and both branches.
+    p : float
+        Default ``np.inf``: plain wavelet leaders, EXACTLY today's
+        behavior (this code path is untouched by the finite-p addition --
+        same lines, same operations, byte-identical output). Any finite
+        p > 0: finite-p leaders (see module docstring for the exact
+        construction, traced from MULTIFRACS's ``DxPx2d.m``). Only
+        implemented for ``cone='multifracs'`` (raises ``NotImplementedError``
+        for ``cone='pymultifracs'`` -- out of scope: pymultifracs' own
+        finite-p support, if any, has not been read or validated here).
+        p <= 0 raises ``ValueError`` (not meaningful for any p-leader).
+    pre_combined_power : bool
+        Default ``False``: ``coeffs_by_scale`` holds RAW coefficients (this
+        function applies ``|.|**p`` itself), matching the self-contained
+        contract p=infinity already has. ``True``: ``coeffs_by_scale``
+        ALREADY holds ``|coefficient|**p`` (or, for multi-orientation 2D
+        data, ``sum_orientations |coef_orientation|**p`` -- see
+        `_dwt2.combine_orientations_p`) -- this function only applies the
+        ``2**(dim*j)`` scale weight and the final root, without touching
+        the input again. Needed because orientation-combination for
+        finite p must happen INSIDE the ``|.|**p`` transform (summing raw
+        coefficients across orientations first would be mathematically
+        wrong), not before it as p=infinity's max-modulus combination
+        does -- see module docstring. Ignored when ``p == np.inf``.
 
     Returns
     -------
     dict[int, ndarray]
         Leader arrays, same keys as ``coeffs_by_scale``.
     """
+    is_p_inf = (p == np.inf)
+    if not is_p_inf and p <= 0:
+        raise ValueError(f"p must be positive (or np.inf); got {p!r}")
+
+    weight_explicit = weight is not _UNSET
     if weight is _UNSET:
         weight = 1.0 if cone == 'multifracs' else 'pymultifracs'
     if boundary is _UNSET:
@@ -285,9 +423,25 @@ def compute_leaders(coeffs_by_scale, dim=1, weight=_UNSET,
     if scales != list(range(1, len(scales) + 1)):
         raise ValueError("scales must be contiguous starting at 1")
 
+    if not is_p_inf and cone != 'multifracs':
+        raise NotImplementedError(
+            f"finite p is only implemented for cone='multifracs' "
+            f"(MULTIFRACS's own p-leader construction); "
+            f"cone={cone!r} with p={p} is out of scope for this extension."
+        )
+    if not is_p_inf and weight_explicit and weight != 1.0:
+        warnings.warn(
+            f"weight={weight!r} was passed explicitly together with "
+            f"finite p={p}, but MULTIFRACS's finite-p fold applies no "
+            f"per-fold weight (it is always 1.0 -- all scale-dependence "
+            f"lives in the 2**(dim*j) factor applied to 'own', once, at "
+            f"birth). weight is ignored for finite p.",
+            RuntimeWarning,
+        )
+
     leaders = {}
 
-    if cone == 'multifracs':
+    if cone == 'multifracs' and is_p_inf:
         sans_voisin = None
         for j in scales:
             own = np.abs(coeffs_by_scale[j])
@@ -297,6 +451,27 @@ def compute_leaders(coeffs_by_scale, dim=1, weight=_UNSET,
                 sans_voisin = _fold_children(own, sans_voisin, dim, weight)
             leaders[j] = _neighborhood_max(sans_voisin, dim,
                                             boundary=boundary)
+    elif cone == 'multifracs':  # finite p
+        base_by_scale = {
+            j: (coeffs_by_scale[j] if pre_combined_power
+                else np.abs(coeffs_by_scale[j]) ** p)
+            for j in scales
+        }
+        _p_validity_zp(base_by_scale, scales, p)
+
+        sans_voisin = None
+        for j in scales:
+            own = (2.0 ** (dim * j)) * base_by_scale[j]
+            if sans_voisin is None:
+                sans_voisin = own
+            else:
+                sans_voisin = _fold_children(own, sans_voisin, dim, 1.0,
+                                              op=np.sum)
+            leaders[j] = _neighborhood_max(sans_voisin, dim,
+                                            boundary=boundary, op=np.sum)
+
+        for j in scales:
+            leaders[j] = (2.0 ** (-dim * j) * leaders[j]) ** (1.0 / p)
     elif cone == 'pymultifracs':
         prev = None
         for j in scales:

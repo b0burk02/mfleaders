@@ -272,13 +272,45 @@ def combine_orientations(coeffs_by_scale):
     DWT) need on top of that core, per the wavelet-leader definition (Wendt,
     Roux, Jaffard & Abry 2009): the leader is a sup over the spatial
     neighborhood, the scale cone, AND all orientations, at each point.
+
+    p=infinity ONLY. See `combine_orientations_p` for finite p -- summing
+    raw coefficients across orientations (or taking max of them) is NOT the
+    right operation once |.|**p enters the picture; unlike max, |.|**p does
+    not commute with a later max taken over a different axis grouping.
     """
     return {j: np.max(np.abs(c), axis=0) for j, c in coeffs_by_scale.items()}
 
 
-def leaders_2d(image, wt_name='db3', normalization=1, j2=None):
+def combine_orientations_p(coeffs_by_scale, p):
+    """Finite-p analogue of `combine_orientations`: sum of |coefficient|**p
+    over the 3 orientations, per scale.
+
+    Proven equivalent to MULTIFRACS's own per-orientation-then-sum-at-the-
+    end structure (`DxPx2d.m` keeps `sans_voisin` and the neighborhood step
+    separate per orientation throughout, combining only in the final
+    ``leader.value{j} = sum(lead_value, 3)``): every step of the finite-p
+    pipeline up to the single final ``**(1/p)`` root (this function, the
+    cone fold, and the spatial-neighborhood step in
+    `leaders.compute_leaders`) is a pure sum, and summing is fully
+    associative/commutative/distributive across ANY grouping of axes --
+    unlike p=infinity's max, whose equivalence under early-vs-late
+    combination relies on max's idempotence specifically, this one relies
+    on linearity holding at every intermediate step. So pre-combining
+    orientations HERE, before `compute_leaders` ever sees the data, is
+    mathematically identical to combining them only at the very end, AS
+    LONG AS ``|.|**p`` is applied to each raw orientation coefficient
+    exactly once (done here) and the final root is taken exactly once, at
+    the very end (`compute_leaders`'s finishing step, via
+    ``pre_combined_power=True``).
+    """
+    return {j: np.sum(np.abs(c) ** p, axis=0) for j, c in coeffs_by_scale.items()}
+
+
+def leaders_2d(image, wt_name='db3', normalization=1, j2=None, p=np.inf):
     """One-call 2D wavelet-leader construction that reproduces MULTIFRACS
-    end to end, DWT included, with NO keyword arguments beyond the image.
+    end to end, DWT included, with NO keyword arguments beyond the image
+    (for p=infinity; `p` is finite-p leaders, see `combine_orientations_p`
+    and `leaders.compute_leaders`).
 
     Exists because `leaders.compute_leaders`'s own defaults (cone, weight,
     boundary) already reproduce MULTIFRACS's leader-construction convention
@@ -313,6 +345,11 @@ def leaders_2d(image, wt_name='db3', normalization=1, j2=None):
     ----------
     image : ndarray, shape (n_rows, n_cols)
     wt_name, normalization, j2 : see `wavelet_transform_2d`.
+    p : float
+        Default ``np.inf`` (plain wavelet leaders) -- THIS PATH IS
+        UNCHANGED, same two lines as before finite-p support existed.
+        Any finite p > 0: finite-p leaders, via `combine_orientations_p`
+        + `compute_leaders(..., p=p, pre_combined_power=True)`.
 
     Returns
     -------
@@ -324,5 +361,9 @@ def leaders_2d(image, wt_name='db3', normalization=1, j2=None):
     coeffs = wavelet_transform_2d(image, wt_name=wt_name,
                                    normalization=normalization, j2=j2,
                                    border='multifracs')
-    mag = combine_orientations(coeffs)
-    return compute_leaders(mag, dim=2)
+    if p == np.inf:
+        mag = combine_orientations(coeffs)
+        return compute_leaders(mag, dim=2)
+
+    mag_p = combine_orientations_p(coeffs, p)
+    return compute_leaders(mag_p, dim=2, p=p, pre_combined_power=True)
